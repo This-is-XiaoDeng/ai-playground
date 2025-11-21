@@ -1,9 +1,20 @@
+
 import React, { useRef } from 'react';
-import { Plus, MessageSquare, Trash, Settings, Download, Upload, Menu } from 'lucide-react';
+import { Plus, MessageSquare, Trash, Upload, Menu, Download } from 'lucide-react';
 import { useStore } from '../store';
-import { Session } from '../types';
+import { Session, Role, PlaygroundMessage } from '../types';
 import { DEFAULT_CONFIG } from '../constants';
 import { v4 as uuidv4 } from 'uuid';
+
+// Helper to safely parse JSON arguments from tool calls
+const tryParseJSON = (str: any) => {
+    if (typeof str !== 'string') return str || {};
+    try {
+        return JSON.parse(str);
+    } catch (e) {
+        return {};
+    }
+};
 
 export const Sidebar: React.FC = () => {
   const { 
@@ -21,38 +32,110 @@ export const Sidebar: React.FC = () => {
       reader.onload = (event) => {
           try {
               const json = JSON.parse(event.target?.result as string);
-              
-              // Basic validation and conversion
-              // Assuming importing OpenAI-like format or internal format
-              // If it's an array of messages, wrap it in a session structure
               let newSession: Session;
 
-              if (Array.isArray(json)) {
-                  // Assume OpenAI message export
+              // Case 1: Internal App Export (Has explicit config object)
+              if (json.config && Array.isArray(json.messages)) {
+                  newSession = { ...json, id: uuidv4() };
+              }
+              // Case 2: OpenAI API Payload (Has messages array but no internal config object)
+              else if (json.messages && Array.isArray(json.messages)) {
+                  const newMessages: PlaygroundMessage[] = [];
+                  const toolCallMap = new Map<string, { msgIdx: number, toolIdx: number }>();
+
+                  // Iterate through flat list and reconstruct nested tool structure
+                  for (const msg of json.messages) {
+                      if (msg.role === 'tool') {
+                          // This is a result message. Find the parent assistant message and update the tool call result.
+                          const mapping = toolCallMap.get(msg.tool_call_id);
+                          if (mapping) {
+                              const parentMsg = newMessages[mapping.msgIdx];
+                              if (parentMsg && parentMsg.toolCalls && parentMsg.toolCalls[mapping.toolIdx]) {
+                                  parentMsg.toolCalls[mapping.toolIdx].result = msg.content;
+                              }
+                          }
+                      } else {
+                          // Determine Role
+                          let role = Role.USER;
+                          if (msg.role === 'assistant') role = Role.MODEL;
+                          else if (msg.role === 'system') role = Role.SYSTEM;
+                          else if (msg.role === 'user') role = Role.USER;
+
+                          // Parse Tool Calls if present
+                          let toolCalls = undefined;
+                          if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+                              toolCalls = msg.tool_calls.map((tc: any) => ({
+                                  id: tc.id,
+                                  name: tc.function?.name || 'unknown',
+                                  args: tryParseJSON(tc.function?.arguments),
+                                  result: undefined // Will be filled by subsequent 'tool' messages
+                              }));
+                          }
+
+                          const newMessage: PlaygroundMessage = {
+                              id: uuidv4(),
+                              role: role,
+                              content: msg.content || '', // content can be null in tool_calls messages
+                              timestamp: Date.now(),
+                              isToolCall: !!(toolCalls && toolCalls.length > 0),
+                              toolCalls: toolCalls
+                          };
+
+                          // Index tool calls for subsequent result folding
+                          if (newMessage.toolCalls) {
+                              newMessage.toolCalls.forEach((tc, idx) => {
+                                  toolCallMap.set(tc.id, { msgIdx: newMessages.length, toolIdx: idx });
+                              });
+                          }
+
+                          newMessages.push(newMessage);
+                      }
+                  }
+
+                  // Extract Config from top-level properties
+                  const config = { ...DEFAULT_CONFIG };
+                  if (json.model) config.model = json.model;
+                  if (typeof json.temperature === 'number') config.temperature = json.temperature;
+                  if (typeof json.top_p === 'number') config.topP = json.top_p;
+                  // Handle max_tokens or max_completion_tokens
+                  if (typeof json.max_tokens === 'number') config.maxOutputTokens = json.max_tokens;
+                  if (typeof json.max_completion_tokens === 'number') config.maxOutputTokens = json.max_completion_tokens;
+                  
+                  // Handle tools definition
+                  if (json.tools) {
+                      config.toolsDefinition = JSON.stringify(json.tools, null, 2);
+                  }
+
                   newSession = {
                       id: uuidv4(),
-                      name: 'Imported Session',
+                      name: `Imported ${config.model || 'Session'}`,
+                      createdAt: Date.now(),
+                      config: config,
+                      messages: newMessages
+                  };
+              }
+              // Case 3: Simple Message Array (Fallback)
+              else if (Array.isArray(json)) {
+                   newSession = {
+                      id: uuidv4(),
+                      name: 'Imported Messages',
                       createdAt: Date.now(),
                       config: { ...DEFAULT_CONFIG },
                       messages: json.map((m: any) => ({
                           id: uuidv4(),
-                          role: m.role,
+                          role: m.role === 'assistant' ? Role.MODEL : (m.role || Role.USER),
                           content: m.content || '',
                           timestamp: Date.now()
                       }))
-                  };
-              } else if (json.messages && json.config) {
-                  // Internal format
-                  newSession = json;
+                   };
               } else {
-                  alert("Unknown JSON format");
-                  return;
+                  throw new Error("Unknown JSON format. Expected OpenAI payload or Session export.");
               }
               
               importSession(newSession);
           } catch (err) {
               console.error(err);
-              alert("Failed to parse JSON");
+              alert("Failed to parse JSON: " + (err as Error).message);
           }
       };
       reader.readAsText(file);
@@ -71,7 +154,7 @@ export const Sidebar: React.FC = () => {
   }
 
   return (
-    <div className="w-64 border-r border-gray-800 bg-gray-950 flex flex-col h-full transition-all">
+    <div className="w-64 border-r border-gray-800 bg-gray-950 flex flex-col h-full transition-all shrink-0">
       <div className="p-4 border-b border-gray-800 flex items-center justify-between">
         <span className="font-bold text-gray-100">AI Playground</span>
         <button onClick={toggleSidebar} className="text-gray-500 hover:text-white">
@@ -130,7 +213,8 @@ export const Sidebar: React.FC = () => {
            onClick={toggleSettings}
            className="w-full flex items-center gap-2 p-2 text-sm text-gray-400 hover:text-white hover:bg-gray-900 rounded"
         >
-            <Settings size={14} /> Settings
+            {/* Using Download icon as generic settings icon was requested in types but typically Settings is better */}
+            <Menu size={14} className="rotate-90" /> Settings
         </button>
       </div>
     </div>

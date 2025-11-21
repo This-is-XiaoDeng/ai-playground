@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useLayoutEffect } from 'react';
 import { useStore } from '../store';
 import { PlaygroundMessage, Role } from '../types';
 import { Trash2, Plus, Play, Loader2, Terminal } from 'lucide-react';
@@ -78,6 +78,7 @@ const ToolCallBlock: React.FC<{ message: PlaygroundMessage, sessionId: string }>
 // --- Sub-component: Message Row ---
 const MessageRow: React.FC<{ message: PlaygroundMessage, sessionId: string, isLast: boolean }> = ({ message, sessionId, isLast }) => {
     const { updateMessage, deleteMessage } = useStore();
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     const handleRoleChange = (newRole: Role) => {
         updateMessage(sessionId, message.id, { role: newRole });
@@ -86,6 +87,30 @@ const MessageRow: React.FC<{ message: PlaygroundMessage, sessionId: string, isLa
     const handleContentChange = (newContent: string) => {
         updateMessage(sessionId, message.id, { content: newContent });
     };
+
+    // Auto-resize textarea while preserving scroll position
+    useLayoutEffect(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+
+        // Find the scrollable container (the MessageList container)
+        const scrollContainer = el.closest('.custom-scrollbar') as HTMLElement;
+        
+        // Snapshot the current scroll position before we mess with heights
+        const currentScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+
+        // Reset height to auto to get the correct scrollHeight for shrinking content
+        el.style.height = 'auto';
+        
+        // Set new height based on content
+        const newHeight = el.scrollHeight;
+        el.style.height = `${newHeight}px`;
+
+        // Restore the scroll position immediately to prevent jumping
+        if (scrollContainer) {
+            scrollContainer.scrollTop = currentScrollTop;
+        }
+    }, [message.content]);
 
     return (
         <div className="group relative flex gap-4 p-4 border-b border-gray-800/50 hover:bg-gray-900/30 transition-colors">
@@ -110,17 +135,12 @@ const MessageRow: React.FC<{ message: PlaygroundMessage, sessionId: string, isLa
             {/* Content Editor */}
             <div className="flex-1 min-w-0">
                 <textarea
+                    ref={textareaRef}
                     value={message.content || ''}
                     onChange={(e) => handleContentChange(e.target.value)}
-                    className="w-full bg-transparent text-sm text-gray-200 outline-none resize-none min-h-[24px] overflow-hidden"
+                    className="w-full bg-transparent text-sm text-gray-200 outline-none resize-none overflow-hidden block"
                     placeholder={message.role === Role.MODEL ? 'Enter assistant message...' : `Enter ${message.role} message...`}
-                    style={{ height: 'auto' }}
-                    onInput={(e) => {
-                        const target = e.target as HTMLTextAreaElement;
-                        target.style.height = 'auto';
-                        target.style.height = target.scrollHeight + 'px';
-                    }}
-                    ref={(el) => { if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; } }}
+                    rows={1}
                 />
                 
                 {/* Tool Calls */}
@@ -160,6 +180,7 @@ export const MessageList: React.FC = () => {
 
   const handleAddMessage = (role: Role = Role.USER) => {
       addMessage(session.id, { role, content: '' });
+      // Note: We intentionally do NOT scroll to bottom here to preserve user context
   };
 
   const handleRun = async () => {
@@ -219,8 +240,8 @@ export const MessageList: React.FC = () => {
       </div>
 
       {/* Sticky Footer Controls */}
-      <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-gray-950 via-gray-950 to-transparent">
-          <div className="max-w-2xl mx-auto flex gap-4 items-center">
+      <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-gray-950 via-gray-950 to-transparent pointer-events-none">
+          <div className="max-w-2xl mx-auto flex gap-4 items-center pointer-events-auto">
             <div className="flex-1 bg-gray-900/80 backdrop-blur border border-gray-800 rounded-lg p-1 flex items-center justify-between px-4 py-2 shadow-xl">
                 <span className="text-xs text-gray-500">
                     {session.messages.length} messages &bull; {session.config.model}
